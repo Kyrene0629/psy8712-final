@@ -73,7 +73,7 @@ get_embedding_batch <- function(text_vec) {
 
 embedding_rows <- split(
   seq_len(nrow(sample_text_tbl)),
-  ceiling(seq_len(nrow(sample_text_tbl)) / embedding_batch_size)
+  ceiling(seq_len(nrow(sample_text_tbl)) )
 )
 
 embedding_list <- map(
@@ -117,4 +117,35 @@ n_docs <- nrow(dtm)
 n_terms <- ncol(dtm)
 n_docs / n_terms
 # 0.9022651
+
+sparsitycutoff <- 0.9997
+slim_dtm <- removeSparseTerms(dtm, sparsitycutoff)
+row_totals <- slam::row_sums(slim_dtm)
+
+slim_doc_ids <- as.integer(slim_dtm$dimnames$Docs)
+
+n_docs_slim <- nrow(slim_dtm)
+n_terms_slim <- ncol(slim_dtm)
+n_docs_slim / n_terms_slim
+# 2.471083
+
+token_mat <- as.matrix(slim_dtm)
+colnames(token_mat) <- make.names(colnames(token_mat), unique = TRUE) # make token column names valid R names; names are unique but not all syntactically valid
+token_tbl <- as_tibble(token_mat) %>% # convert token matrix to tibble 
+  mutate(doc_id = slim_doc_ids) %>% # attach document IDs in the exact row order
+  select(doc_id, everything()) # keep doc_id first for readability
+
+dtm_stm <- readCorpus(slim_dtm, type = "slam")
+detectCores()
+# 8
+cluster <- makePSOCKcluster(num_cores)
+registerDoParallel(cluster)
+kresult <- searchK(
+  dtm_stm$documents, 
+  dtm_stm$vocab, 
+  K = seq(2, 20, by = 2), 
+  cores = min(4, max(1, 8 - 1)) # use up to 4 cores instead of all available cores so the laptop stays stable becuase I first chose to use 7 cores. MY LAPTOP DIED
+)
+
+
 
