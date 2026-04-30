@@ -21,11 +21,100 @@ glassdoor_raw_tbl <- read_csv("../data/glassdoor_reviews.csv")
 ml_text_tbl <- glassdoor_raw_tbl %>%
   select(overall_rating, headline, pros, cons) %>%
   mutate(review_id = row_number(),
-         review_text = str_squish(paste(replace_na(headline, ""),
-                                        replace_na(pros, ""),
-                                        replace_na(cons, ""),
-                                   sep = " ")
-                                  )
-         )
+         review_text = str_squish(str_c(
+           replace_na(headline, ""),
+           replace_na(pros, ""),
+           replace_na(cons, ""),
+           sep = " "
+         ))
+         ) 
 ml_text_tbl$review_text
+nrow(ml_text_tbl)
+# 838566
+
+sample_n <- 10000
+sample_prop <- sample_n / nrow(ml_text_tbl)
+
+sample_text_tbl <- ml_text_tbl %>%
+  group_by(overall_rating) %>%
+  slice_sample(prop = sample_prop) %>%
+  ungroup() %>%
+  mutate(doc_id = row_number()) %>%
+  select(doc_id, overall_rating, review_text)
+
+# check the sample size and rating distribution
+nrow(sample_text_tbl)
+# 9998
+
+sample_text_tbl %>%
+  count(overall_rating) %>%
+  mutate(prop = n / sum(n))
+
+# Embeddings
+get_embedding_batch <- function(text_vec) {
+  response <- POST(
+    url = "http://localhost:11434/api/embed",
+    content_type_json(),
+    body = list(
+      model = "nomic-embed-text",
+      input = text_vec
+    ),
+    encode = "json"
+  )
+  
+  stop_for_status(response)
+  
+  result <- content(response, as = "parsed")
+  embedding_mat <- do.call(rbind, result$embeddings)
+  storage.mode(embedding_mat) <- "double"
+  
+  embedding_mat
+}
+
+embedding_rows <- split(
+  seq_len(nrow(sample_text_tbl)),
+  ceiling(seq_len(nrow(sample_text_tbl)) / embedding_batch_size)
+)
+
+embedding_list <- map(
+  embedding_rows,
+  ~ get_embedding_batch(sample_text_tbl$review_text[.x])
+)
+
+embedding_mat <- do.call(rbind, embedding_list)
+
+colnames(embedding_mat) <- paste0("emb_", seq_len(ncol(embedding_mat)))
+
+embedding_tbl <- as_tibble(embedding_mat) %>%
+  mutate(doc_id = sample_text_tbl$doc_id) %>%
+  select(doc_id, everything())
+
+# save embeddings because they take a long time to create
+# write_rds(embedding_tbl, "../out/embedding_tbl.rds")
+
+# Tokenization and Topic Modeling
+corpus <- VCorpus(VectorSource(sample_text_tbl$review_text))
+
+corpus_clean <- corpus %>%
+  tm_map(content_transformer(str_to_lower)) %>%
+  tm_map(removePunctuation) %>%
+  tm_map(removeNumbers) %>%
+  tm_map(content_transformer(lemmatize_strings)) %>%
+  tm_map(
+    removeWords,
+    c(
+      stopwords("en"),
+      "company", "companies", "glassdoor",
+      "job", "jobs", "work", "employee", "employees"
+    )
+  ) %>%
+  tm_map(stripWhitespace)
+
+dtm <- DocumentTermMatrix(corpus_clean)
+
+# check the N/k ratio
+n_docs <- nrow(dtm)
+n_terms <- ncol(dtm)
+n_docs / n_terms
+# 0.9022651
 
