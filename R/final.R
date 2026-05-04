@@ -153,6 +153,7 @@ kresult <- searchK( # topic models with topics from 2 to 20, searchK() is used s
   K = seq(2, 20, by = 2) 
 )
 stopImplicitCluster() # stop the parallel backend to release the cpu cores
+registerDoSEQ() # force caret to use sequential processing to reduce memory copying
 
 plot(kresult) # use it to inspect the topic number diagnostics, this is the visual display
 kresult$results # this gives the numerical diagnostics
@@ -177,7 +178,6 @@ topic_corr <- topicCorr(topic_model) # compute correlation among topics
 
 theta <- topic_model$theta # extract the estimated proportion of that review devoted to the topic.
 
-# for RQ 2 & 3
 topic_tbl <- as_tibble(theta, # this converts the topic proportion matrix into a tibble and name each column has each name like topic1, topic2, and move the document IDs. I used .name_repair argument to avoid the warning from unnamed matrix columns
                        .name_repair = ~ paste0("topic_", seq_along(.x))) %>% 
   mutate(doc_id = slim_doc_ids) %>% 
@@ -185,195 +185,340 @@ topic_tbl <- as_tibble(theta, # this converts the topic proportion matrix into a
 
 # Final ML Dataset
 
-ml_tbl <- sample_text_tbl %>%
-  inner_join(token_tbl, by = "doc_id") %>%
-  inner_join(embedding_tbl, by = "doc_id") %>%
-  inner_join(topic_tbl, by = "doc_id") %>%
-  select(-review_text)
-# saveRDS(ml_tbl, "../out/data.RDS")
+ml_tbl <- sample_text_tbl %>% # to create the final machine leaning table, I first start from the sample review dataset
+  inner_join(token_tbl, by = "doc_id") %>% # then join token predictors by doc_id, I use inner_join() becuase it only keeps only documents with valid token rows
+  inner_join(embedding_tbl, by = "doc_id") %>% # then join embedding predictors by doc_id, I still use inner_join() because it keeps the machine learning dataset that aligned across feature sets
+  inner_join(topic_tbl, by = "doc_id") %>% # join topic predictors by doc_id, so this creates the full pre-split machine leanring dataset that is necessary for the following parts 
+  select(-review_text) # remove review text because machine learning models only use numeric predictors not text
+# saveRDS(ml_tbl, "../out/data.RDS") # save the machine learning dataset
 
-ml_id_tbl <- ml_tbl %>%
-  select(doc_id, overall_rating)
+ml_id_tbl <- ml_tbl %>%  # make a small table with only ID and outcome, so later joins can be cleaner
+  select(doc_id, overall_rating) # keep those two as the outcomes
 
-token_df <- ml_id_tbl %>%
-  inner_join(token_tbl, by = "doc_id")
+token_df <- ml_id_tbl %>% # token only dataset, this is the baseline for RQ1 and RQ2
+  inner_join(token_tbl, by = "doc_id") # use inner_join by doc_id to protect row matching
 
-embedding_df <- ml_id_tbl %>%
-  inner_join(embedding_tbl, by = "doc_id")
+embedding_df <- ml_id_tbl %>% # embedding only the dataset
+  inner_join(embedding_tbl, by = "doc_id") # join embeddings back to the same review ids
 
-topic_df <- ml_id_tbl %>%
-  inner_join(topic_tbl, by = "doc_id")
+token_embedding_df <- ml_id_tbl %>% # token + embedding dataset, needed for RQ1
+  inner_join(token_tbl, by = "doc_id") %>% # add token predictors first because tokenization is the baseline
+  inner_join(embedding_tbl, by = "doc_id") # then add embeddings to see if they can improve beyond tokens
 
-token_topic_df <- ml_id_tbl %>%
-  inner_join(token_tbl, by = "doc_id") %>%
-  inner_join(topic_tbl, by = "doc_id")
+topic_df <- ml_id_tbl %>% # topic only dataset, tests only topics
+  inner_join(topic_tbl, by = "doc_id") # join topic probability back to the same review ids
 
-embedding_topic_df <- ml_id_tbl %>%
-  inner_join(embedding_tbl, by = "doc_id") %>%
-  inner_join(topic_tbl, by = "doc_id")
+token_topic_df <- ml_id_tbl %>% # token + topic dataset, needed for RQ2
+  inner_join(token_tbl, by = "doc_id") %>% # add token predictors as the baseline
+  inner_join(topic_tbl, by = "doc_id") # then add topic predictors to see if topics can improve beyond tokens
 
-all_feature_df <- ml_id_tbl %>%
-  inner_join(token_tbl, by = "doc_id") %>%
-  inner_join(embedding_tbl, by = "doc_id") %>%
-  inner_join(topic_tbl, by = "doc_id")
+embedding_topic_df <- ml_id_tbl %>% # embedding + topic dataset, needed for RQ3 and nonlinear models
+  inner_join(embedding_tbl, by = "doc_id") %>% # add embeddings because they represent semantic meaning
+  inner_join(topic_tbl, by = "doc_id") # then add topics because they represent main ideas in the reviews
+
+all_feature_df <- ml_id_tbl %>% # used for RQ4
+  inner_join(token_tbl, by = "doc_id") %>% # include tokens
+  inner_join(embedding_tbl, by = "doc_id") %>% # include embeddings
+  inner_join(topic_tbl, by = "doc_id") # include topics
 
 # Analysis
-train_index <- createDataPartition(
-  ml_tbl$overall_rating,
-  p = .8,
-  list = FALSE
+train_index <- createDataPartition( # create train index. I use createDataPartition() to keep the rating distribution more balanced
+  ml_tbl$overall_rating, # split based on outcome variable
+  p = .8, # use 80% for training and 20% for holdout
+  list = FALSE # return row numbers instead of a list, so it is easier to subset later
 )
 
-train_tbl <- ml_tbl[train_index, ]
-test_tbl <- ml_tbl[-train_index, ]
+train_tbl <- ml_tbl[train_index, ] # create training data from the 80% selected rows
+test_tbl <- ml_tbl[-train_index, ] # create holdout data from the other 20% of rows
 
-training_token <- token_df[train_index, ] %>%
-  select(-doc_id) 
+training_token <- token_df[train_index, ] %>% # create training data for the token model
+  select(-doc_id)  # remove doc_id because it is not a predictor
 
-holdout_token <- token_df[-train_index, ] %>%
-  select(-doc_id) 
+holdout_token <- token_df[-train_index, ] %>% # create holdout data for the token model
+  select(-doc_id) # remove doc_id to match with the training data
 
-training_embedding <- embedding_df[train_index, ] %>%
-  select(-doc_id) 
+training_embedding <- embedding_df[train_index, ] %>% # create training data for the embedding model
+  select(-doc_id) # remove doc_id because it doesnt predict ratings
 
-holdout_embedding <- embedding_df[-train_index, ] %>%
-  select(-doc_id) 
+holdout_embedding <- embedding_df[-train_index, ] %>% # create holdout data for the embedding model
+  select(-doc_id) # remove doc_id,so it only use the embedding predictors
 
-training_topic <- topic_df[train_index, ] %>%
-  select(-doc_id) 
-holdout_topic <- topic_df[-train_index, ] %>%
-  select(-doc_id) 
+training_token_embedding <- token_embedding_df[train_index, ] %>%  # create training data for token + embedding model
+  select(-doc_id) # remove doc_id because it doesnt have meaningful text information
 
-training_token_topic <- token_topic_df[train_index, ] %>%
-  select(-doc_id) 
+holdout_token_embedding <- token_embedding_df[-train_index, ] %>% # create holdout data for token + embedding model
+  select(-doc_id) # remove doc_id to match with the training data
 
-holdout_token_topic <- token_topic_df[-train_index, ] %>%
-  select(-doc_id) 
+training_topic <- topic_df[train_index, ] %>% # create training data for topic model
+  select(-doc_id) # keep only predictors
+holdout_topic <- topic_df[-train_index, ] %>% # create holdout data for topic model
+  select(-doc_id) # keep only predictors
 
-training_embedding_topic <- embedding_topic_df[train_index, ] %>%
-  select(-doc_id) 
+training_token_topic <- token_topic_df[train_index, ] %>% # create training data for token + topic model
+  select(-doc_id) # keep only predictors
 
-holdout_embedding_topic <- embedding_topic_df[-train_index, ] %>%
-  select(-doc_id) 
+holdout_token_topic <- token_topic_df[-train_index, ] %>% # create holdout data for token + topic model
+  select(-doc_id) # keep only predictors
 
-training_all <- train_tbl %>%
-  select(-doc_id) 
+training_embedding_topic <- embedding_topic_df[train_index, ] %>% # create training data for embedding + topic model
+  select(-doc_id) # keep only predictors
 
-holdout_all <- test_tbl %>%
-  select(-doc_id) 
+holdout_embedding_topic <- embedding_topic_df[-train_index, ] %>% # create holdout data for embedding + topic model
+  select(-doc_id) # keep only predictors
+
+training_all <- train_tbl %>% # create training data with all predictors
+  select(-doc_id) # keep only predictors
+
+holdout_all <- test_tbl %>% # create holdout data with all predictors
+  select(-doc_id) # keep only predictors
 
 # Elastic Net Models
 fit_token <- train(
-  overall_rating ~ .,
-  data = training_token, 
-  method = "glmnet",
+  overall_rating ~ ., # predict overall rating from all token predictors
+  data = training_token,  # use token training data 
+  method = "glmnet", # use glmnet because there are many predictors and they are correlated, ols is not suitable here
   trControl = trainControl(
-    method = "cv", 
-    number = 5, 
-    verboseIter = TRUE 
+    method = "cv",# use cross validation
+    number = 5, # use 5 folds, 10 folds have longer runtime
+    verboseIter = TRUE # print progress
   ), 
-  preProcess = c("zv", "center", "scale"), 
+  preProcess = c("nzv", "center", "scale"), # remove near zero variance predictors and standardize predictors for glmnet
   tuneGrid = expand.grid(
-    alpha = c(0, 1),
-    lambda = seq(0.0001, 0.1, length = 10)),  
-  metric = "RMSE" 
+    alpha = c(0, 1), # alpha 0 is ridge and alpha 1 is lasso
+    lambda = seq(0.0001, 0.1, length = 10)),  # examine different penalty values
+  metric = "RMSE" # overall_rating is numeric, so I use RMSE
 )
 
 fit_embedding <- train(
-  overall_rating ~ ., 
-  data = training_embedding, 
-  method = "glmnet",
+  overall_rating ~ ., # predict overall rating from the embedding dimensions
+  data = training_embedding, # use embedding training data to test the embeddings 
+  method = "glmnet",  # use glmnet because the embeddings are numeric predictors and can be correlated
   trControl = trainControl(
-    method = "cv", 
-    number = 5, 
-    verboseIter = TRUE 
+    method = "cv", # use cross validation
+    number = 5, # use 5 folds, 10 folds have longer runtime
+    verboseIter = TRUE # print progress
   ), 
-  preProcess = c("zv", "center", "scale"), 
+  preProcess = c("nzv", "center", "scale"), # remove near zero variance predictors and standardize predictors for glmnet
   tuneGrid = expand.grid(
-    alpha = c(0, 1),
-    lambda = seq(0.0001, 0.1, length = 10)), 
-  metric = "RMSE" 
+    alpha = c(0, 1), # compare ridge and lasso
+    lambda = seq(0.0001, 0.1, length = 10)), # examine different penalty values
+  metric = "RMSE" # overall_rating is numeric, so I use RMSE
+)
+
+fit_token_embedding <- train(
+  overall_rating ~ ., # predict overall rating from both tokens and embeddings
+  data = training_token_embedding, # it tests the embeddings beyond tokens, sue for RQ1
+  method = "glmnet", # use glmnet because the embeddings are numeric predictors and can be correlated
+  trControl = trainControl(
+    method = "cv", # use cross validation
+    number = 5, # use 5 folds, 10 folds have longer runtime
+    verboseIter = TRUE # print progress
+  ),
+  preProcess = c("nzv", "center", "scale"),  # remove near zero variance predictors and standardize predictors for glmnet
+  tuneGrid = expand.grid(
+    alpha = c(0, 1), # compare ridge and lasso
+    lambda = seq(0.0001, 0.1, length = 10) # examine different penalty values
+  ),
+  metric = "RMSE" # overall_rating is numeric, so I use RMSE
 )
 
 fit_topic <- train(
-  overall_rating ~ ., 
-  data = training_topic, 
-  method = "glmnet", 
+  overall_rating ~ ., # predict overall rating from topic probabilities
+  data = training_topic,  # use topic data to test topics alone
+  method = "glmnet", # use glmnet because the embeddings are numeric predictors and can be correlated
   trControl = trainControl(
-    method = "cv", 
-    number = 5, 
-    verboseIter = TRUE 
+    method = "cv", # use cross validation
+    number = 5,# use 5 folds, 10 folds have longer runtime
+    verboseIter = TRUE # print progress
   ), 
-  preProcess = c("zv", "center", "scale"), 
+  preProcess = c("nzv", "center", "scale"), # remove near zero variance predictors and standardize predictors for glmnet
   tuneGrid = expand.grid(
-    alpha = c(0, 1),
-    lambda = seq(0.0001, 0.1, length = 10)), 
-  metric = "RMSE" 
+    alpha = c(0, 1), # compare ridge and lasso
+    lambda = seq(0.0001, 0.1, length = 10)), # examine different penalty values
+  metric = "RMSE" # overall_rating is numeric, so I use RMSE
 )
 
 fit_token_topic <- train(
-  overall_rating ~ ., 
-  data = training_token_topic, 
-  method = "glmnet", 
+  overall_rating ~ ., # predict overall rating from tokens + topics
+  data = training_token_topic, # it tests topics beyond tokens, use for RQ2
+  method = "glmnet", # tokens are highly dimensional
   trControl = trainControl(
-    method = "cv", 
-    number = 5, 
-    verboseIter = TRUE 
+    method = "cv", # use cross validation
+    number = 5, # use 5 folds, 10 folds have longer runtime
+    verboseIter = TRUE # print progress
   ), 
-  preProcess = c("zv", "center", "scale"), 
+  preProcess = c("nzv", "center", "scale"), # remove near zero variance predictors and standardize predictors for glmnet
   tuneGrid = expand.grid(
-    alpha = c(0, 1),
-    lambda = seq(0.0001, 0.1, length = 10)), 
-  metric = "RMSE" 
+    alpha = c(0, 1), # compare ridge and lasso
+    lambda = seq(0.0001, 0.1, length = 10)), # examine different penalty values
+  metric = "RMSE" # overall_rating is numeric, so I use RMSE
 )
 
 fit_embedding_topic <- train(
-  overall_rating ~ ., 
-  data = training_embedding_topic, 
-  method = "glmnet", 
+  overall_rating ~ ., # predict overall rating from embeddings + topics
+  data = training_embedding_topic, # it combines two reduced text features, use for RQ3
+  method = "glmnet", # embeddings and topics may still be correlated
   trControl = trainControl(
-    method = "cv", 
-    number = 5, 
-    verboseIter = TRUE 
+    method = "cv", # use cross validation
+    number = 5, # use 5 folds, 10 folds have longer runtime
+    verboseIter = TRUE # print progress
   ), 
-  preProcess = c("zv", "center", "scale"), 
+  preProcess = c("nzv", "center", "scale"), # remove near zero variance predictors and standardize predictors for glmnet
   tuneGrid = expand.grid(
-    alpha = c(0, 1),
-    lambda = seq(0.0001, 0.1, length = 10)),
-  metric = "RMSE" 
+    alpha = c(0, 1), # compare ridge and lasso
+    lambda = seq(0.0001, 0.1, length = 10)), # examine different penalty values
+  metric = "RMSE" # overall_rating is numeric, so I use RMSE
 )
 
 fit_all <- train(
-  overall_rating ~ ., 
-  data = training_all, 
-  method = "glmnet", 
+  overall_rating ~ ., # predict overall rating from tokens, embeddings, and topics
+  data = training_all, # use all for RQ4
+  method = "glmnet", # highly dimensional
   trControl = trainControl(
-    method = "cv", 
-    number = 5, 
-    verboseIter = TRUE 
+    method = "cv", # use cross validation
+    number = 5, # use 5 folds, 10 folds have longer runtime
+    verboseIter = TRUE # print progress
   ), 
-  preProcess = c("zv", "center", "scale"), 
+  preProcess = c("nzv", "center", "scale"), # remove near zero variance predictors and standardize predictors for glmnet
   tuneGrid = expand.grid(
-    alpha = c(0, 1),
-    lambda = seq(0.0001, 0.1, length = 10)), 
-  metric = "RMSE" 
+    alpha = c(0, 1), # compare ridge and lasso
+    lambda = seq(0.0001, 0.1, length = 10)),  # examine different penalty values
+  metric = "RMSE" # overall_rating is numeric, so I use RMSE
 )
 
 # Random Forest Model
 fit_embedding_topic_rf <- train(
-  overall_rating ~ ., 
+  overall_rating ~ ., # predict overall rating from embeddings + topics
   data = training_embedding_topic, 
-  method = "ranger", 
+  method = "ranger", # use ranger because it is the random forest method in caret
   trControl = trainControl(
-    method = "cv", 
-    number = 5, 
-    verboseIter = TRUE 
+    method = "cv", # use cross validation
+    number = 5, # use 5 folds, 10 folds have longer runtime
+    verboseIter = TRUE # print progress
   ), 
-  preProcess = c("zv"), 
+  preProcess = c("nzv"), # remove near zero variance predictors, and no center and scale because trees do not need that
   tuneGrid = expand.grid(
-    mtry = c(25, 100, 250), 
-    splitrule = "variance", 
-    min.node.size = c(5, 10)), 
-  metric = "RMSE"
+    mtry = c(25, 100, 250), # test different numbers of predictors available at each split
+    splitrule = "variance", # because overall_rating is numeric
+    min.node.size = c(5, 10)), # test two node sizes, it affects tree complexity
+  metric = "RMSE" # overall_rating is numeric, so I use RMSE
 )
+
+# XGBoost Tree Model
+fit_embedding_topic_xgbtree <- train(
+  overall_rating ~ ., # predict overall rating from embeddings + topics
+  data = training_embedding_topic, # keep xgboost runtime manageable
+  method = "xgbTree", # it is a strong boosted tree model in caret
+  trControl = trainControl(
+    method = "cv", # use cross validation
+    number = 5, # use 5 folds, 10 folds have longer runtime
+    verboseIter = TRUE), # print progress
+  preProcess = c("nzv"), # remove near zero variance predictors, and no center and scale because trees do not need that
+  tuneGrid = expand.grid(nrounds = c(50, 100), # test number of boosting rounds
+                         max_depth = c(2, 4), # avoid too much overfitting
+                         eta = c(0.05, 0.1), # alswo learning rates
+                         gamma = 0, # keep gamma fixed to keep grid smaller
+                         colsample_bytree = 0.8, # use 80% of predictors for each tree
+                         min_child_weight = 1, # use default to avoid making grid too large
+                         subsample = 0.8), # use 80% of rows for each tree
+  metric = "RMSE" # overall_rating is numeric, so I use RMSE
+  )
+
+# Model Comparison
+model_resamples <- resamples(
+  list(
+    token_glmnet = fit_token, # token only model
+    embedding_glmnet = fit_embedding, # embedding only model
+    topic_glmnet = fit_topic, # topic only model
+    token_embedding_glmnet = fit_token_embedding, # token + embedding model for RQ1
+    token_topic_glmnet = fit_token_topic, # token + topic model for RQ2
+    embedding_topic_glmnet = fit_embedding_topic, # embedding + topic model for RQ3
+    all_glmnet = fit_all, # elastic net model for RQ4
+    embedding_topic_rf = fit_embedding_topic_rf, # random forest model
+    embedding_topic_xgbtree = fit_embedding_topic_xgbtree # xgboost model
+  )
+)
+summary(model_resamples) # summarize al models' cross validated performance 
+dotplot(model_resamples, metric = "RMSE") # plot RMSE from resamples
+
+# holdout evaluation
+token_pred <- predict(fit_token, holdout_token) # predict holdout ratings from the token model
+embedding_pred <- predict(fit_embedding, holdout_embedding)  # predict holdout ratings from the embedding model
+topic_pred <- predict(fit_topic, holdout_topic) # predict holdout ratings from the topic model
+token_embedding_pred <- predict(fit_token_embedding, holdout_token_embedding) # predict holdout ratings from token + embedding model
+token_topic_pred <- predict(fit_token_topic, holdout_token_topic) # predict holdout ratings from token + topic model
+embedding_topic_pred <- predict(fit_embedding_topic, holdout_embedding_topic) # predict holdout ratings from embedding + topic model
+all_pred <- predict(fit_all, holdout_all) # predict holdout ratings from all feature model
+rf_pred <- predict(fit_embedding_topic_rf, holdout_embedding_topic) # predict holdout ratings from random forest
+xgbtree_pred <- predict(fit_embedding_topic_xgbtree, holdout_embedding_topic) # predict holdout ratings from xgboost tree
+
+holdout_results_tbl <- tibble( # I only want to create one table to store holdout performance for every model
+  model_name = c( # store model names, ensure readability
+    "Token elastic net",
+    "Embedding elastic net",
+    "Topic elastic net",
+    "Token + embedding elastic net",
+    "Token + topic elastic net",
+    "Embedding + topic elastic net",
+    "Token + embedding + topic elastic net",
+    "Embedding + topic random forest",
+    "Embedding + topic xgboost tree"
+  ),
+  base_model = c( # store the model type used for each row
+    "glmnet",
+    "glmnet",
+    "glmnet",
+    "glmnet",
+    "glmnet",
+    "glmnet",
+    "glmnet",
+    "ranger",
+    "xgbTree"
+  ),
+  holdout_rmse = c( # calculate RMSE for each model, lower is better
+    RMSE(token_pred, holdout_token$overall_rating),
+    RMSE(embedding_pred, holdout_embedding$overall_rating),
+    RMSE(topic_pred, holdout_topic$overall_rating),
+    RMSE(token_embedding_pred, holdout_token_embedding$overall_rating),
+    RMSE(token_topic_pred, holdout_token_topic$overall_rating),
+    RMSE(embedding_topic_pred, holdout_embedding_topic$overall_rating),
+    RMSE(all_pred, holdout_all$overall_rating),
+    RMSE(rf_pred, holdout_embedding_topic$overall_rating),
+    RMSE(xgbtree_pred, holdout_embedding_topic$overall_rating)
+  ),
+  holdout_rsq = c( # calculate R squared for each model, higher is better
+    R2(token_pred, holdout_token$overall_rating),
+    R2(embedding_pred, holdout_embedding$overall_rating),
+    R2(topic_pred, holdout_topic$overall_rating),
+    R2(token_embedding_pred, holdout_token_embedding$overall_rating),
+    R2(token_topic_pred, holdout_token_topic$overall_rating),
+    R2(embedding_topic_pred, holdout_embedding_topic$overall_rating),
+    R2(all_pred, holdout_all$overall_rating),
+    R2(rf_pred, holdout_embedding_topic$overall_rating),
+    R2(xgbtree_pred, holdout_embedding_topic$overall_rating)
+  )
+) %>%
+  arrange(holdout_rmse) # so best model appears first
+
+holdout_results_tbl # print the holdout results
+write_csv(holdout_results_tbl, "../out/holdout_results.csv") # save holdout results to the out subfolder
+
+# Research Questions 1 ~ 4
+# RQ1. Does the use of embeddings (using the nomic-embed-text LLM embeddings model) improve prediction of satisfaction beyond a rigorous tokenization strategy?
+# Yes, the use of embeddings improve prediction of satisfaction beyond a rigorous tokenization strategy.
+# The Token elastic net model has RMSE = 1.04 and R squared = 0.204.
+# The Token + embedding elastic net model has RMSE = 0.888 and R squared = 0.414.
+# Since RMSE decreases from 1.04 to 0.888, embeddings improves prediction beyond the rigorous tokenization model.
+
+# RQ2. Does the use of topics improve prediction of satisfaction beyond a rigorous tokenization strategy?
+# Yes, the use of topics improve prediction of satisfaction beyond a rigorous tokenization strategy, but the improvement is smaller than embeddings
+# The Token elastic net model has RMSE = 1.04 and R squared = 0.204.
+# The Token + topic elastic net model has RMSE = 0.996 and R squared = 0.263
+# Since RMSE decreases from 1.04 to 0.996, topics improve prediction beyond tokenization. However, topics add some incremental value to the tokens, but topics themselves are weak predictors because the Topic elastic net model has RMSE = 1.04 and R squared = 0.191
+
+# RQ3. Does the use of embeddings plus topics improve prediction of satisfaction beyond either alone?
+
+
+# RQ4. What is the best prediction of overall job satisfaction achievable using text reviews as source data?
+
 
