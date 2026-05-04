@@ -141,48 +141,239 @@ token_tbl <- as_tibble(token_mat) %>% # convert token matrix to tibble
   mutate(doc_id = slim_doc_ids) %>% # attach document IDs in the exact row order
   select(doc_id, everything()) # keep doc_id first for readability
 
-dtm_stm <- readCorpus(slim_dtm, type = "slam")
-detectCores()
+dtm_stm <- readCorpus(slim_dtm, type = "slam") # convert into the list format required by stm
+detectCores() # check how many cpu cores in my computer
 # 8
-num_cores <- 8 - 1
-registerDoParallel(num_cores)
+num_cores <- 8 - 1 # set the number of cores to 7, use most but not all cpu cores
+registerDoParallel(num_cores) # this is a parallel backend so multiple cpu cores can be used
 
-kresult <- searchK(
+kresult <- searchK( # topic models with topics from 2 to 20, searchK() is used so the number selection is based on diagnostics
   dtm_stm$documents, 
   dtm_stm$vocab, 
   K = seq(2, 20, by = 2) 
 )
-stopImplicitCluster()
+stopImplicitCluster() # stop the parallel backend to release the cpu cores
 
-plot(kresult)
-kresult$results
+plot(kresult) # use it to inspect the topic number diagnostics, this is the visual display
+kresult$results # this gives the numerical diagnostics
 
-# select K = 10 becuas it has the best heldout likelihood and has strong exclusivity and a moderate number of interpretable topics
+# select K = 10 becuas it has the best heldout likelihood and has strong exclusivity and a manageable number of interpretable topics
 
-topic_model <- stm( 
+topic_model <- stm( # so then I fit the final STM topic model with 10 topics, these topic proportions can then be used as predictors of overall satisfaction
   documents = dtm_stm$documents,
   vocab = dtm_stm$vocab,
   K = 10
 )
 
-topic_labels <- labelTopics(topic_model, n = 10)
+topic_labels <- labelTopics(topic_model, n = 10) # this extracts the top words for each topic so I can know what each topic represents
 
-topic_examples <- findThoughts( 
+topic_examples <- findThoughts( # this finds representative review texts for each topic and match() is used to align the sampled text with the documents in slim_dtm
   topic_model,
   texts = sample_text_tbl$review_text[match(slim_doc_ids, sample_text_tbl$doc_id)],
   n = 3
 )
 
-topic_corr <- topicCorr(topic_model)
+topic_corr <- topicCorr(topic_model) # compute correlation among topics
 
-theta <- topic_model$theta
+theta <- topic_model$theta # extract the estimated proportion of that review devoted to the topic.
 
-topic_tbl <- as_tibble(theta,
+# for RQ 2 & 3
+topic_tbl <- as_tibble(theta, # this converts the topic proportion matrix into a tibble and name each column has each name like topic1, topic2, and move the document IDs. I used .name_repair argument to avoid the warning from unnamed matrix columns
                        .name_repair = ~ paste0("topic_", seq_along(.x))) %>% 
   mutate(doc_id = slim_doc_ids) %>% 
   select(doc_id, everything())
 
-# Analysis
 # Final ML Dataset
 
+ml_tbl <- sample_text_tbl %>%
+  inner_join(token_tbl, by = "doc_id") %>%
+  inner_join(embedding_tbl, by = "doc_id") %>%
+  inner_join(topic_tbl, by = "doc_id") %>%
+  select(-review_text)
+# saveRDS(ml_tbl, "../out/data.RDS")
+
+ml_id_tbl <- ml_tbl %>%
+  select(doc_id, overall_rating)
+
+token_df <- ml_id_tbl %>%
+  inner_join(token_tbl, by = "doc_id")
+
+embedding_df <- ml_id_tbl %>%
+  inner_join(embedding_tbl, by = "doc_id")
+
+topic_df <- ml_id_tbl %>%
+  inner_join(topic_tbl, by = "doc_id")
+
+token_topic_df <- ml_id_tbl %>%
+  inner_join(token_tbl, by = "doc_id") %>%
+  inner_join(topic_tbl, by = "doc_id")
+
+embedding_topic_df <- ml_id_tbl %>%
+  inner_join(embedding_tbl, by = "doc_id") %>%
+  inner_join(topic_tbl, by = "doc_id")
+
+all_feature_df <- ml_id_tbl %>%
+  inner_join(token_tbl, by = "doc_id") %>%
+  inner_join(embedding_tbl, by = "doc_id") %>%
+  inner_join(topic_tbl, by = "doc_id")
+
+# Analysis
+train_index <- createDataPartition(
+  ml_tbl$overall_rating,
+  p = .8,
+  list = FALSE
+)
+
+train_tbl <- ml_tbl[train_index, ]
+test_tbl <- ml_tbl[-train_index, ]
+
+training_token <- token_df[train_index, ] %>%
+  select(-doc_id) 
+
+holdout_token <- token_df[-train_index, ] %>%
+  select(-doc_id) 
+
+training_embedding <- embedding_df[train_index, ] %>%
+  select(-doc_id) 
+
+holdout_embedding <- embedding_df[-train_index, ] %>%
+  select(-doc_id) 
+
+training_topic <- topic_df[train_index, ] %>%
+  select(-doc_id) 
+holdout_topic <- topic_df[-train_index, ] %>%
+  select(-doc_id) 
+
+training_token_topic <- token_topic_df[train_index, ] %>%
+  select(-doc_id) 
+
+holdout_token_topic <- token_topic_df[-train_index, ] %>%
+  select(-doc_id) 
+
+training_embedding_topic <- embedding_topic_df[train_index, ] %>%
+  select(-doc_id) 
+
+holdout_embedding_topic <- embedding_topic_df[-train_index, ] %>%
+  select(-doc_id) 
+
+training_all <- train_tbl %>%
+  select(-doc_id) 
+
+holdout_all <- test_tbl %>%
+  select(-doc_id) 
+
+# Elastic Net Models
+fit_token <- train(
+  overall_rating ~ .,
+  data = training_token, 
+  method = "glmnet",
+  trControl = trainControl(
+    method = "cv", 
+    number = 5, 
+    verboseIter = TRUE 
+  ), 
+  preProcess = c("zv", "center", "scale"), 
+  tuneGrid = expand.grid(
+    alpha = c(0, 1),
+    lambda = seq(0.0001, 0.1, length = 10)),  
+  metric = "RMSE" 
+)
+
+fit_embedding <- train(
+  overall_rating ~ ., 
+  data = training_embedding, 
+  method = "glmnet",
+  trControl = trainControl(
+    method = "cv", 
+    number = 5, 
+    verboseIter = TRUE 
+  ), 
+  preProcess = c("zv", "center", "scale"), 
+  tuneGrid = expand.grid(
+    alpha = c(0, 1),
+    lambda = seq(0.0001, 0.1, length = 10)), 
+  metric = "RMSE" 
+)
+
+fit_topic <- train(
+  overall_rating ~ ., 
+  data = training_topic, 
+  method = "glmnet", 
+  trControl = trainControl(
+    method = "cv", 
+    number = 5, 
+    verboseIter = TRUE 
+  ), 
+  preProcess = c("zv", "center", "scale"), 
+  tuneGrid = expand.grid(
+    alpha = c(0, 1),
+    lambda = seq(0.0001, 0.1, length = 10)), 
+  metric = "RMSE" 
+)
+
+fit_token_topic <- train(
+  overall_rating ~ ., 
+  data = training_token_topic, 
+  method = "glmnet", 
+  trControl = trainControl(
+    method = "cv", 
+    number = 5, 
+    verboseIter = TRUE 
+  ), 
+  preProcess = c("zv", "center", "scale"), 
+  tuneGrid = expand.grid(
+    alpha = c(0, 1),
+    lambda = seq(0.0001, 0.1, length = 10)), 
+  metric = "RMSE" 
+)
+
+fit_embedding_topic <- train(
+  overall_rating ~ ., 
+  data = training_embedding_topic, 
+  method = "glmnet", 
+  trControl = trainControl(
+    method = "cv", 
+    number = 5, 
+    verboseIter = TRUE 
+  ), 
+  preProcess = c("zv", "center", "scale"), 
+  tuneGrid = expand.grid(
+    alpha = c(0, 1),
+    lambda = seq(0.0001, 0.1, length = 10)),
+  metric = "RMSE" 
+)
+
+fit_all <- train(
+  overall_rating ~ ., 
+  data = training_all, 
+  method = "glmnet", 
+  trControl = trainControl(
+    method = "cv", 
+    number = 5, 
+    verboseIter = TRUE 
+  ), 
+  preProcess = c("zv", "center", "scale"), 
+  tuneGrid = expand.grid(
+    alpha = c(0, 1),
+    lambda = seq(0.0001, 0.1, length = 10)), 
+  metric = "RMSE" 
+)
+
+# Random Forest Model
+fit_embedding_topic_rf <- train(
+  overall_rating ~ ., 
+  data = training_embedding_topic, 
+  method = "ranger", 
+  trControl = trainControl(
+    method = "cv", 
+    number = 5, 
+    verboseIter = TRUE 
+  ), 
+  preProcess = c("zv"), 
+  tuneGrid = expand.grid(
+    mtry = c(25, 100, 250), 
+    splitrule = "variance", 
+    min.node.size = c(5, 10)), 
+  metric = "RMSE"
+)
 
