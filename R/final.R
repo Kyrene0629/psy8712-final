@@ -517,8 +517,13 @@ write_csv(holdout_results_tbl, "../out/holdout_results.csv") # save holdout resu
 # Since RMSE decreases from 1.04 to 0.996, topics improve prediction beyond tokenization. However, topics add some incremental value to the tokens, but topics themselves are weak predictors because the Topic elastic net model has RMSE = 1.04 and R squared = 0.191
 
 # RQ3. Does the use of embeddings plus topics improve prediction of satisfaction beyond either alone?
-
+# Yes, but the use of embeddings plus topics only slightly improve prediction of satisfaction beyond embeddings alone
+# The Embedding elastic net model has RMSE = 0.899 and R squared = 0.400.
+# The Topic elastic net model has RMSE = 1.04 and R squared = 0.191
+# The Embedding + topic elastic net model has RMSE = 0.892 and R squared = 0.410
+# Since 0.892 is lower than 0.899 and 1.04, the Embedding + topic elastic net model improves prediction beyond either one alone. However, I did notice the improvement beyond embeddings alone is pretty small
 
 # RQ4. What is the best prediction of overall job satisfaction achievable using text reviews as source data?
-
+# The best prediction of overall job satisfaction achievable using text reviews as source data is the Token + embedding + topic elastic net model becuase it has RMSE = 0.883 and R squared = 0.421
+# The best prediction comes from combining tokens, embeddings, and topics in an elastic net model
 
