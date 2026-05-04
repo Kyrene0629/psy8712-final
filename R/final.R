@@ -71,9 +71,11 @@ get_embedding_batch <- function(text_vec) {
   embedding_mat
 }
 
+embedding_batch_size <- 50
+
 embedding_rows <- split(
   seq_len(nrow(sample_text_tbl)),
-  ceiling(seq_len(nrow(sample_text_tbl)) )
+  ceiling(seq_len(nrow(sample_text_tbl)) / embedding_batch_size)
 )
 
 embedding_list <- map(
@@ -138,14 +140,43 @@ token_tbl <- as_tibble(token_mat) %>% # convert token matrix to tibble
 dtm_stm <- readCorpus(slim_dtm, type = "slam")
 detectCores()
 # 8
-cluster <- makePSOCKcluster(num_cores)
-registerDoParallel(cluster)
+num_cores <- 8 - 1
+registerDoParallel(num_cores)
+
 kresult <- searchK(
   dtm_stm$documents, 
   dtm_stm$vocab, 
-  K = seq(2, 20, by = 2), 
-  cores = min(4, max(1, 8 - 1)) # use up to 4 cores instead of all available cores so the laptop stays stable becuase I first chose to use 7 cores. MY LAPTOP DIED
+  K = seq(2, 20, by = 2) 
+)
+stopImplicitCluster()
+
+plot(kresult)
+kresult$results
+
+# select K = 10 becuas it has the best heldout likelihood and has strong exclusivity and a moderate number of interpretable topics
+
+topic_model <- stm( 
+  documents = dtm_stm$documents,
+  vocab = dtm_stm$vocab,
+  K = 10
 )
 
+topic_labels <- labelTopics(topic_model, n = 10)
+
+topic_examples <- findThoughts( 
+  topic_model,
+  texts = sample_text_tbl$review_text[match(slim_doc_ids, sample_text_tbl$doc_id)],
+  n = 3
+)
+
+topic_corr <- topicCorr(topic_model)
+
+theta <- topic_model$theta
+
+topic_tbl <- as_tibble(theta, .name_repair = ~ paste0("topic_", seq_along(.x))) %>% 
+  mutate(doc_id = slim_doc_ids) %>% 
+  select(doc_id, everything())
+
+# Final ML Dataset
 
 
