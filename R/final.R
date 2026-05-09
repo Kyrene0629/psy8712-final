@@ -47,7 +47,7 @@ sample_text_tbl <- ml_text_tbl %>% # start a new pipeline for creating the model
 # check the sample size and rating distribution
 # nrow(sample_text_tbl)
 # 9998
-# the reason it is not 10000 is becuase proportional stratified sampling with integer-sized rating groups can round smaller.
+# the reason it is not 10000 is because proportional stratified sampling with integer-sized rating groups can round smaller.
 
 sample_text_tbl %>% # this checks the rating distribution in the sample. I use count() to calculate frequencies and mutate() to calculate proportions, so I can confirm that the sample still represents the outcome distribution
   count(overall_rating) %>%
