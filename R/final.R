@@ -183,6 +183,8 @@ topic_tbl <- as_tibble(theta, # this converts the topic proportion matrix into a
   mutate(doc_id = slim_doc_ids) %>% 
   select(doc_id, everything())
 
+# Analysis
+
 # Final ML Dataset
 
 ml_tbl <- sample_text_tbl %>% # to create the final machine leaning table, I first start from the sample review dataset
@@ -221,7 +223,6 @@ all_feature_df <- ml_id_tbl %>% # used for RQ4
   inner_join(embedding_tbl, by = "doc_id") %>% # include embeddings
   inner_join(topic_tbl, by = "doc_id") # include topics
 
-# Analysis
 train_index <- createDataPartition( # create train index. I use createDataPartition() to keep the rating distribution more balanced
   ml_tbl$overall_rating, # split based on outcome variable
   p = .8, # use 80% for training and 20% for holdout
@@ -423,6 +424,11 @@ fit_embedding_topic_xgbtree <- train(
                          subsample = 0.8), # use 80% of rows for each tree
   metric = "RMSE" # overall_rating is numeric, so I use RMSE
   )
+
+
+# I only examined embeddings + topics for random forest and XGBoost Tree Model for extra comparisons for RQ4. I did not try every set of comparisons becuase these models can be much slower with the whole token matrix.
+# I think I made a very practical choice.
+# I included all elastic net models becuase elastic net handles high dimensional predictors very well.
 
 # Model Comparison
 model_resamples <- resamples(
